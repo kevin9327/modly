@@ -420,6 +420,25 @@ async def list_ollama_models(ollama_url: str = "http://localhost:11434"):
             return {"models": []}
 
 
+async def _unload_llm_after_workflow(
+    client: httpx.AsyncClient,
+    request: AgentChatRequest,
+    actions_done: list[ActionDone],
+) -> None:
+    """Free the Ollama model's VRAM once a workflow has been dispatched, so the
+    workflow gets the full GPU. Best-effort — never fail the chat over it."""
+    if not any(a.tool == "run_workflow" for a in actions_done):
+        return
+    try:
+        await client.post(
+            f"{request.ollama_url}/api/generate",
+            json={"model": request.model, "keep_alive": 0},
+            timeout=5.0,
+        )
+    except Exception:
+        pass
+
+
 @router.post("/chat", response_model=AgentChatResponse)
 async def agent_chat(request: AgentChatRequest):
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -488,6 +507,7 @@ async def agent_chat(request: AgentChatRequest):
 
             tool_calls = msg.get("tool_calls") or []
             if not tool_calls:
+                await _unload_llm_after_workflow(client, request, actions_done)
                 combined_thinking = "\n\n---\n\n".join(all_thinking) if all_thinking else None
                 return AgentChatResponse(
                     message=clean_content,
@@ -501,17 +521,8 @@ async def agent_chat(request: AgentChatRequest):
                 actions_done.append(ActionDone(tool=fn["name"], result=result_text, payload=payload))
                 messages.append({"role": "tool", "content": result_text})
 
-        has_workflow = any(a.tool == "run_workflow" for a in actions_done)
-        if has_workflow:
-            # Unload LLM from VRAM immediately so the workflow has full GPU memory
-            try:
-                await client.post(
-                    f"{request.ollama_url}/api/generate",
-                    json={"model": request.model, "keep_alive": 0},
-                    timeout=5.0,
-                )
-            except Exception:
-                pass
+        # Loop exhausted without a final answer: still free VRAM if a workflow ran.
+        await _unload_llm_after_workflow(client, request, actions_done)
 
     combined_thinking = "\n\n---\n\n".join(all_thinking) if all_thinking else None
     return AgentChatResponse(message="Reached maximum tool iterations.", actions=actions_done, thinking=combined_thinking)
