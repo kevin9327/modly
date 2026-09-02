@@ -267,7 +267,8 @@ async def execute_tool(name: str, arguments: dict, context: dict) -> tuple[str, 
                 return f"Available models:\n{lines}", None
 
             elif name == "unload_models":
-                await client.post(f"{MODLY_API}/model/unload-all")
+                r = await client.post(f"{MODLY_API}/model/unload-all")
+                r.raise_for_status()
                 return "All 3D generation models have been unloaded from VRAM.", None
 
             elif name == "get_mesh_info":
